@@ -40,6 +40,10 @@ WHAT CHANGED IN THIS VERSION (all aimed at small API quotas)
     quota is spent where you care about.
   - Networks are de-duplicated by BSSID, so repeated pages cannot inflate
     counts.
+  - --check-quota: makes ONE tiny API call and says whether your quota is
+    available. Needs no --bbox. The script now records when WiGLE answers
+    429 (in the cache file), so repeated checks show how long the cutoff
+    lasted and whether it looks like a rolling window or a fixed daily reset.
 
 SETUP
   Dry run and --counts-only need only:   pip install requests
@@ -53,6 +57,7 @@ WiGLE credentials: your own account, from https://wigle.net/account
 Never put your token in the script or in a repository.
 
 USAGE
+    python3 find_gap_streets.py --check-quota
     python3 find_gap_streets.py --bbox LAT_MIN LAT_MAX LNG_MIN LNG_MAX --dry-run
     python3 find_gap_streets.py --bbox LAT_MIN LAT_MAX LNG_MIN LNG_MAX --max-calls 40
     python3 find_gap_streets.py --bbox LAT_MIN LAT_MAX LNG_MIN LNG_MAX --counts-only
@@ -594,6 +599,12 @@ def main():
           f"API calls used this run: {budget.used}.")
     if stop_reason:
         print(f"Stopped early: {stop_reason}. Run the same command again later and it resumes from the cache.")
+        if "429" in stop_reason:
+            e = _open_entry(cache)
+            if e and e.get("calls_before_limit"):
+                print(f"{e['calls_before_limit']} calls worked before the 429 (the count above also includes the "
+                      f"rejected call). If your quota was fresh when you started, that is your daily limit.")
+            print("Later, run with --check-quota (no --bbox needed) to see when it is back.")
 
     if args.counts_only:
         return
