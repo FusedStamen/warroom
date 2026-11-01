@@ -83,8 +83,9 @@ Files are written to the folder you run the command from, unless you pass other 
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--bbox` | required | `lat_min lat_max lng_min lng_max` |
+| `--bbox` | required (except with `--check-quota`) | `lat_min lat_max lng_min lng_max` |
 | `--out` | `gaps.gpx` | Route output file |
+| `--check-quota` | off | Make one tiny API call and say whether your quota is available. Needs no `--bbox`. |
 | `--dry-run` | off | Print the API call estimate and exit. No quota used. |
 | `--max-calls` | none | Stop cleanly after this many WiGLE API calls |
 | `--max-pages` | `1` | Pages fetched per tile. One page is 100 networks. |
@@ -114,6 +115,26 @@ Files are written to the folder you run the command from, unless you pass other 
 - **Running out is safe.** On the daily-limit error (HTTP 429) or when `--max-calls` is reached, the script saves everything and stops. Run the same command again later.
 - **Cached tiles cost nothing.** Delete `wigle_points_cache.json` only if you want fresh data.
 - **Old cache files:** a cache from the earlier version of this script is moved to `wigle_points_cache.json.v1.bak` and ignored, because it could not tell finished tiles from unfinished ones.
+
+### Find your own daily limit and when it resets
+
+WiGLE does not publish a fixed number, and the limit can differ per account. You can measure yours. This deliberately uses up the rest of your day's allowance, so do it when you do not need the API.
+
+1. Run a count export over a box big enough that you run out of quota before you run out of tiles. About 3 degrees each way around you is roughly 22,500 tiles. Use `--dry-run` with the same arguments first to see the tile count. Start from a folder with no old cache file.
+   ```bash
+   export WIGLE_API_NAME=your_api_name
+   export WIGLE_API_TOKEN=your_api_token
+   python3 find_gap_streets.py --bbox LAT_MIN LAT_MAX LNG_MIN LNG_MAX --counts-only --center LAT LNG
+   ```
+2. It stops at the first HTTP 429 and prints how many calls worked. If your quota was fresh when you started, that is your daily limit. The call count it prints also includes the rejected call, so the limit is that number minus 1. The cutoff time is saved in `wigle_points_cache.json`.
+3. Later, check whether you are back. This needs no `--bbox` and uses at most one call:
+   ```bash
+   python3 find_gap_streets.py --check-quota
+   ```
+   Run it once an hour. It reports "still limited" or "quota available" and shows how long the cutoff lasted.
+4. Compare a few days. If you come back at the same clock time every day, the reset is at a fixed time. If you come back about the same number of hours after each cutoff, it is a rolling window.
+
+Notes: `--check-quota` also needs your credentials and writes to the cache file in the folder you run it from. It makes calls at the same gentle pace as the rest of the script and stops at the first 429.
 
 ### Things that can surprise you
 
