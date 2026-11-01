@@ -78,6 +78,7 @@ import math
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import requests
 
@@ -170,6 +171,116 @@ def save_cache(path, cache):
     os.replace(tmp, path)
 
 
+# ---------------------------------------------------------------- limit log
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt):
+    return dt.isoformat(timespec="seconds")
+
+
+def _show(iso):
+    """Local-time display of a stored UTC timestamp."""
+    if not iso:
+        return "unknown"
+    return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _hours_between(start_iso, end_iso):
+    delta = datetime.fromisoformat(end_iso) - datetime.fromisoformat(start_iso)
+    return delta.total_seconds() / 3600.0
+
+
+def _open_entry(cache):
+    for e in reversed(cache.get("limit_log", [])):
+        if e.get("back_at") is None:
+            return e
+    return None
+
+
+def record_limited(cache, calls_before):
+    """Note that WiGLE answered 429. calls_before is how many calls worked
+    first in this run; 0 means we only found out we were already limited."""
+    now = _iso(_now())
+    entry = _open_entry(cache)
+    if entry is not None:
+        entry["last_limited_at"] = now
+        return
+    log = cache.setdefault("limit_log", [])
+    log.append({
+        "hit_at": now if calls_before > 0 else None,
+        "first_seen": now,
+        "calls_before_limit": calls_before if calls_before > 0 else None,
+        "last_limited_at": now,
+        "back_at": None,
+    })
+    del log[:-20]
+
+
+def mark_back(cache):
+    """A call worked after a recorded limit. Returns the closed entry or None.
+    back_at is the first moment we SAW it working, so the true reset was at
+    or before it."""
+    entry = _open_entry(cache)
+    if entry is None:
+        return None
+    entry["back_at"] = _iso(_now())
+    return entry
+
+
+def print_limit_history(cache):
+    log = cache.get("limit_log", [])
+    if not log:
+        return
+    print("Limit history (newest last):")
+    for e in log[-5:]:
+        ref = e.get("hit_at") or e.get("first_seen")
+        how = "hit" if e.get("hit_at") else "first seen limited"
+        line = f"  {how} {_show(ref)}"
+        if e.get("calls_before_limit"):
+            line += f", {e['calls_before_limit']} calls worked before the 429"
+        if e.get("back_at"):
+            line += f", seen working again {_show(e['back_at'])} (at most {_hours_between(ref, e['back_at']):.1f} h later)"
+        else:
+            line += ", not seen working again yet"
+        print(line)
+
+
+def check_quota(auth, cache, cache_path):
+    """One tiny API call to see whether the quota is available. Needs no bbox."""
+    params = {"latrange1": 0.0, "latrange2": 0.001, "longrange1": 0.0,
+              "longrange2": 0.001, "resultsPerPage": 1}
+    try:
+        resp = requests.get(WIGLE_SEARCH_URL, params=params, auth=auth, timeout=30)
+    except requests.RequestException as e:
+        sys.exit(f"Could not reach WiGLE: {e}")
+    code = resp.status_code
+    if code in (401, 403):
+        sys.exit(f"WiGLE rejected the credentials (HTTP {code}). Check WIGLE_API_NAME and WIGLE_API_TOKEN.")
+    if code == 429:
+        record_limited(cache, 0)
+        save_cache(cache_path, cache)
+        e = _open_entry(cache)
+        ref = e.get("hit_at") or e.get("first_seen")
+        print(f"STILL LIMITED (HTTP 429). Limited since {_show(ref)}"
+              + ("" if e.get("hit_at") else " (first seen then; the real cutoff was earlier)") + ".")
+        print_limit_history(cache)
+        print("Check again later. Each check uses one call once you are back.")
+        return
+    if code >= 400:
+        sys.exit(f"WiGLE returned HTTP {code}. Try again later.")
+    closed = mark_back(cache)
+    save_cache(cache_path, cache)
+    print("QUOTA AVAILABLE: the test call worked (it used 1 call).")
+    if closed is not None:
+        print("This closes the last recorded limit. If the same clock time shows up each day, the reset is "
+              "at a fixed time. If it is about the same number of hours after the cutoff each time, "
+              "it is a rolling window.")
+    print_limit_history(cache)
+
+
 def tile_status(rec):
     """unfetched / partial / complete / stuck"""
     if rec is None or rec["pages"] == 0:
@@ -231,6 +342,7 @@ def fetch_tiles(auth, tiles, cache, cache_path, step, max_pages, budget):
                     print(f"  tile {k}: network error ({e}), skipping for now", file=sys.stderr)
                     break
                 if resp.status_code == 429:
+                    record_limited(cache, budget.used - 1)
                     raise StopRun("WiGLE daily limit reached (HTTP 429)")
                 if resp.status_code in (401, 403):
                     raise StopRun(f"WiGLE rejected the credentials (HTTP {resp.status_code}). "
@@ -241,6 +353,7 @@ def fetch_tiles(auth, tiles, cache, cache_path, step, max_pages, budget):
                 except (requests.RequestException, ValueError) as e:
                     print(f"  tile {k}: bad response ({e}), skipping for now", file=sys.stderr)
                     break
+                mark_back(cache)
 
                 batch = data.get("results") or []
                 new = 0
@@ -430,7 +543,10 @@ def write_gpx(routes, out_path):
 
 def main():
     ap = argparse.ArgumentParser(description="Find unscanned residential streets using WiGLE data, low-quota friendly.")
-    ap.add_argument("--bbox", type=float, nargs=4, metavar=("LAT_MIN", "LAT_MAX", "LNG_MIN", "LNG_MAX"), required=True)
+    ap.add_argument("--bbox", type=float, nargs=4, metavar=("LAT_MIN", "LAT_MAX", "LNG_MIN", "LNG_MAX"),
+                    help="area to search (required unless you use --check-quota)")
+    ap.add_argument("--check-quota", action="store_true",
+                    help="make one tiny API call to see if your quota is available; needs no --bbox")
     ap.add_argument("--out", default="gaps.gpx", help="output GPX file")
     ap.add_argument("--tile-step", type=float, default=0.02, help="tile size in degrees (0.02 = one WDGWars cell)")
     ap.add_argument("--min-aps", type=int, default=1, help="streets with fewer APs than this count as gaps")
@@ -442,6 +558,12 @@ def main():
     ap.add_argument("--counts-only", action="store_true", help="fetch tile counts, write the CSV, skip road download and routing")
     ap.add_argument("--counts-csv", default="tile_counts.csv", help="where to write per-tile WiGLE counts")
     args = ap.parse_args()
+
+    if args.check_quota:
+        check_quota(wigle_auth(), load_cache(args.cache, args.tile_step), args.cache)
+        return
+    if not args.bbox:
+        ap.error("--bbox is required (unless you use --check-quota)")
 
     lat_min, lat_max, lng_min, lng_max = args.bbox
     if lat_min >= lat_max or lng_min >= lng_max:
