@@ -1,4 +1,18 @@
-# Wardrive Gap-Finding Scripts
+# Wardrive Tools
+
+Scripts for planning wardrives, tracking WDGWars data through a self-hosted [warroom](https://github.com/Taccooh/warroom), and checking Wardrift. Every script has usage in its header, and most print it when run with no arguments. Nothing here uploads your data anywhere unless the script says so.
+
+| Folder | What is in it |
+|---|---|
+| [`scripts/`](scripts) | Route planning and gap finding, cell watching, trip reports, your own WiGLE coverage heat table |
+| [`tracker/`](tracker) | Pull warroom data and look at leaderboard patterns (descriptive only) |
+| [`wardrift/`](wardrift) | Read-only probes and a log uploader for Wardrift |
+
+Sections below: [gap-finding scripts](#gap-finding-scripts), [shared setup](#shared-setup-for-the-other-tools), [scripts/](#other-scripts-in-scripts), [tracker/](#tracker), [wardrift/](#wardrift), [data limits](#what-the-data-can-and-cannot-show).
+
+---
+
+## Gap-finding scripts
 
 Two scripts for planning wardrives against unscanned territory. Both write a GPX file you can load into OsmAnd or Gaia GPS for turn-by-turn navigation.
 
@@ -193,6 +207,89 @@ If a box returns hundreds of cells, use `--max-stops` rather than planning an un
 
 ---
 
+## Shared setup for the other tools
+
+Python 3.9 or newer. Everything uses only the standard library except `find_gap_streets.py` (`requests`, `osmnx`, `networkx`) and the Wardrift scripts (`requests`). On Windows use `py` instead of `python3`.
+
+**Your warroom address.** Scripts that talk to warroom read it from the `WARROOM_URL` environment variable and stop with a message if it is missing.
+
+```bash
+# Linux / Mac / Pi
+export WARROOM_URL=https://your-warroom.example.com
+
+# Windows PowerShell (this window only)
+$env:WARROOM_URL = "https://your-warroom.example.com"
+
+# Windows, saved for new windows
+setx WARROOM_URL https://your-warroom.example.com
+```
+
+In a cron line, put it in front of the command: `WARROOM_URL=https://... python3 free_cell_watch.py snap ~/free_cell_watch`
+
+**Your warroom token.** A file in the work folder holding the token alone on one line. Tracker scripts want `.token`, `free_cell_watch.py` wants `warroom.token`, `trip_report.py` also accepts the `WARROOM_TOKEN` variable. The token is read-only, is never printed, and `.gitignore` keeps these files out of git. Do not paste it into chats or commit it.
+
+**Python on its own.** The scripts send a `User-Agent: curl/8.5.0` header because the hosted warroom blocks the default Python one.
+
+---
+
+## Other scripts in `scripts/`
+
+| Script | What it does | Run | Output |
+|---|---|---|---|
+| `wigle_cell_heat.py` | Turns your own downloaded WiGLE CSV exports (`.csv`, `.csv.gz`, `.zip`, any depth) into a per-cell heat table on the same 0.02 degree grid as the game. Shows which cells you have already collected heavily, so you can avoid them. No network calls, streams large files. | `py wigle_cell_heat.py "C:\path\to\exports"` | `wigle_cell_heat.csv` (heaviest first) and `wigle_cell_heat_summary.txt` inside that folder. Counts only, no MACs or SSIDs. |
+| `free_cell_watch.py` | Takes a snapshot of every cell where you have APs, plus neighbors of unowned cells, and later reports what changed. Run `snap` on a timer, `report` when you want the summary. | `python3 free_cell_watch.py snap WORKDIR` and `python3 free_cell_watch.py report WORKDIR` | `WORKDIR/snapshots/state_*.csv.gz`, `free_cell_watch_log.txt`, `free_cell_report.txt`. Needs `WORKDIR/warroom.token` and `WARROOM_URL`. Example cron, every 30 minutes: `*/30 * * * * WARROOM_URL=... python3 ~/free_cell_watch.py snap ~/free_cell_watch` |
+| `trip_report.py` | Before and after totals (all-time APs, presence cells) for one player over a time window, from the warroom board history. | `python3 trip_report.py PLAYER_ID ["2026-11-05 13:00:00"] ["end"]`. Start defaults to 24 hours ago. Times are UTC. | Prints and writes `trip_report.txt` in the current folder. |
+| `trip_analysis.py` | Splits a multi-day wardrive from your WiGLE-format CSVs by GPS and time, and compares the drive out with the drive back. | `python3 trip_analysis.py FOLDER_WITH_CSVS [OUTDIR]` | `trip_analysis.txt`, `trip_segments.csv`, `trip_buckets.csv` in OUTDIR. |
+| `route_eval.py` | Example: asks the public OSRM demo server for driving routes between waypoints, then lists active cells you have not visited that are next to each route. Edit the `W` (waypoints) and `R` (routes) tables at the top to your own. | Run `tracker/pull.py` first so `out/state.json` exists in the current folder, then `python3 route_eval.py` | `route/detour_cells.csv` and `route/detour_cells.gpx` in the current folder. |
+
+---
+
+## `tracker/`
+
+For anyone running a warroom who wants to watch the leaderboards. Everything is descriptive: it shows how numbers move, not why. A flag means "different from the others on this measure", never proof of anything, and the scripts only read public board numbers.
+
+Set up a work folder (for example `~/warroom_work`) containing:
+- `.token` with your warroom token
+- `watchlist.json`, copied from `tracker/watchlist.example.json` and edited. Format: `{"players": {"123": "name"}, "gangs": ["Gang Name"]}`. Keep your real list out of the repository (it is in `.gitignore`).
+
+| Script | What it does | Run | Output |
+|---|---|---|---|
+| `pull.py` | Pulls state, all boards, per-player history for everyone on your watchlist, and each listed gang. | `python3 pull.py WORKDIR` | `WORKDIR/out/` with `state.json`, `board_*.json`, `player_*.json`, `hist_*.json`, `gang_*.json`, `watch.json`. |
+| `review.py` | Prints a summary of what `pull.py` collected: where each watched player sits on each board, growth rates, top 10s, gang totals. | `python3 review.py WORKDIR` | Screen only. |
+| `anomaly.py` | Flags accounts that differ from their peers: steady 24/7 gain, batch uploads, week-versus-all-time gap (old data uploaded now), WiFi totals that never decrease, large presence jumps, BLE share. | `python3 anomaly.py boards_log.csv [OUTDIR] [DAYS]` | `anomaly_report.txt` and `anomaly_metrics.csv` in OUTDIR (default `./anomaly_out`, 14 days). |
+| `boards_analysis.py` | Coverage of the hourly board log per player, then a per-day breakdown for one username. | `python3 boards_analysis.py boards_log.csv USERNAME` | Screen only. |
+| `floor_analysis.py` | Compares hourly gain rates ("floor" versus typical) for the usernames you give, with a daily breakdown for the first one. | `python3 floor_analysis.py boards_log.csv NAME1 [NAME2 ...]` | Screen only. |
+| `decay.py` | For each account, how often its WiFi total goes down between hourly samples. | `python3 decay.py boards_log.csv` | Screen only. |
+| `decay_corr.py` | Compares WiFi-total decreases on the board with held-cell and AP changes from player history. Uses a fixed start date near the top of the file. | `python3 decay_corr.py WORKDIR boards_log.csv` | Screen only. |
+| `patterns.py` | For the top players, shows two-day WiFi and BLE gain, BLE share, how much came from the three biggest hours, and active hours. | `python3 patterns.py WORKDIR` (run `pull.py` first) | Screen only. |
+| `regions.py` | Where each player's visible held cells are, by broad region and 50 km block. Needs cell owner ids, which the API no longer exposes, so it is mostly historical now. | `python3 regions.py WORKDIR` | Screen only. |
+| `add_watch.py` | Appends players to the `WARROOM_WATCH` line in `compose.tracker.yml` (the warroom tracker container) and prints the new value. Backs up the file the first time. | `python3 add_watch.py --players players.json [--dry-run] [--file PATH]` | Edits the compose file, prints the new `WARROOM_WATCH` value only. Copy `players.example.json` to start. |
+| `diag.sh` | One-shot API check: token validity, key endpoints, state download, and which token endpoints exist. | `bash diag.sh WORKDIR [PLAYER_ID]` | Screen only. The token is never printed. |
+
+`boards_log.csv` is the hourly board log the warroom territory tracker writes into its `data/` folder (columns include `board`, `source`, `player_id`, `username`, `sample_ts`, `wifi`, `ble`, `rank`).
+
+---
+
+## `wardrift/`
+
+Needs `pip install requests` and your own Wardrift account. Read-only except the uploader.
+
+| Script | What it does | Run | Output |
+|---|---|---|---|
+| `wardrift_probe.py` | Checks that your Wardrift API key works and which authentication style it accepts. | `python3 wardrift_probe.py WORKDIR` with `WORKDIR/wardrift.key` | `wardrift_probe_out.txt`: status codes and JSON field names only, never the key. |
+| `wardrift_area_probe.py` | For a bounding box, lists who controls each hex and the public daily influence history for up to 40 hexes. Asks for your username and password when run; they are used only to sign in. | `py wardrift_area_probe.py WORKDIR SOUTH NORTH WEST EAST` | `wardrift_area_report.txt` and `wardrift_area_tiles.csv`. |
+| `wardrift_upload.py` | Uploads WiGLE-format CSV logs to Wardrift in compliant parts: gzip, size limits, the daily allowance, no duplicates on re-run. | `python3 wardrift_upload.py WORKDIR [--dry-run]` with `WORKDIR/wardrift.key` and `WORKDIR/to_upload/` | `wardrift_upload_log.csv`. Use `--dry-run` first. It reports how many rows are older than 72 hours, which earn no credit. |
+
+---
+
+## What the data can and cannot show
+
+- Boards list only the top 50 players, so most players cannot be looked up on a board.
+- Since late October the warroom API returns owner id 0 for enemy cells, and per-player held-cell history stopped updating for everyone except the key owner. Board numbers still update hourly.
+- A cell shown as `free` has no team listed as owner. It may still be held by a player with no team, which the WDGWars site shows but this feed does not.
+- Presence (cells you have APs in), held cells, and leaderboard WiFi and BLE totals are different measures. Do not compare them with each other.
+- Leaderboard totals include BLE. Only WiFi with a normal MAC counts toward territory.
+
 ## Which one to use
 
 - **You do not run warroom, or you want specific streets:** `find_gap_streets.py`
@@ -201,5 +298,6 @@ If a box returns hundreds of cells, use `--max-stops` rather than planning an un
 ## Before you share or reuse this
 
 - WiGLE data is for planning only. Never upload WiGLE data to WDGWars or anywhere else as your own collection.
-- Use your own WiGLE and warroom tokens. Do not share them, paste them into chats, or commit them.
+- Use your own WiGLE, warroom and Wardrift credentials. Do not share them, paste them into chats, or commit them. `.gitignore` already skips the usual token, key and watchlist files.
+- The `tracker/` scripts describe public numbers only. Treat results as questions to ask, not accusations, and keep any named watchlist private.
 - Both scripts have only been proven on one person's data. If something looks wrong, say so rather than assuming it is right.
