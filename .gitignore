@@ -1,0 +1,14 @@
+# secrets and local data - never commit these
+.token
+warroom.token
+wardrift.key
+*.key
+watchlist.json
+players.json
+out/
+snapshots/
+*.sqlite
+*.sqlite3
+boards_log.csv
+wigle_points_cache.json*
+__pycache__/
