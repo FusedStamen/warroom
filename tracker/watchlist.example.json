@@ -1,0 +1,7 @@
+{
+  "players": {
+    "1": "example_player_one",
+    "2": "example_player_two"
+  },
+  "gangs": ["Example Gang"]
+}
